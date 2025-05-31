@@ -40,39 +40,40 @@ Este proyecto implementa una canalización sin servidor en AWS en dos fases para
 Visualmente, el flujo es:
 ```mermaid
 flowchart LR
-  subgraph API Layer
+  subgraph "API Layer"
     PresignAPI["PresignFunction (Lambda)"]
     APIGW["API Gateway"]
   end
 
-  subgraph Storage Layer
+  subgraph "Storage Layer"
     S3Bucket["CoordinatesBucket (S3)"]
   end
 
-  subgraph Ingestion Layer
+  subgraph "Ingestion Layer"
     IngestFunction["IngestFunction (Lambda)"]
     CoordinatesQueue["CoordinatesQueue (SQS)"]
   end
 
-  subgraph Processing Layer
+  subgraph "Processing Layer"
     ProcessFunction["ProcessFunction (Lambda)"]
     DLQ["CoordinatesDLQ (SQS DLQ)"]
   end
 
-  subgraph Data Layer
+  subgraph "Data Layer"
     DynamoDB["CoordinatesTable (DynamoDB)"]
   end
 
-  user[Usuario] -->|POST /presign { key: "coordenates.csv" }| APIGW
+  user[Usuario] -->|"POST /presign (key: coordenates.csv)"| APIGW
   APIGW --> PresignAPI
-  PresignAPI -->|retorna URL PUT pre-firmada| user
-  user -->|PUT CSV bruto| S3Bucket
-  S3Bucket -->|s3:ObjectCreated:*| IngestFunction
-  IngestFunction -->|SendMessage| CoordinatesQueue
-  CoordinatesQueue -->|Invoca| ProcessFunction
-  ProcessFunction -->|Inserción por lotes| DynamoDB
-  ProcessFunction -->|en caso de fallo| DLQ
-```
+  PresignAPI -->|"retorna URL PUT pre-firmada"| user
+  user -->|"PUT CSV bruto"| S3Bucket
+  S3Bucket -->|"s3:ObjectCreated:*"| IngestFunction
+  IngestFunction -->|"SendMessage"| CoordinatesQueue
+  CoordinatesQueue -->|"Invoca"| ProcessFunction
+  ProcessFunction -->|"Inserción por lotes"| DynamoDB
+  ProcessFunction -->|"en caso de fallo"| DLQ
+
+  ```
 ---
 
 ## Componentes y Flujo
