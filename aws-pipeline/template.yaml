@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Pipeline CSV → DynamoDB → Postcode lookup
+
+Globals:
+  Function:
+    Timeout: 900
+    Runtime: python3.10
+    MemorySize: 2048
+
+Resources:
+
+  #################################################################
+  ### 1) S3 Bucket para las cargas de CSV
+  ###
+  ###    – Definimos BucketName con convención “<StackName>-coordinates-bucket”
+  ###    – NO NotificationConfiguration aquí (SAM lo inyecta automáticamente).
+  #################################################################
+  CoordinatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-coordinates-bucket"
+
+  #################################################################
+  ### 2) DynamoDB On‐Demand table
+  #################################################################
+  CoordinatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordinates
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  #################################################################
+  ### 3) SQS Queue (y su DeadLetter Queue)
+  #################################################################
+  CoordinatesQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+
+  CoordinatesDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+
+  #################################################################
+  ### 4) Lambda · PresignFunction:
+  ###     genera URL presign para subir CSV al bucket
+  ###
+  ###    – POLÍTICA INLINE, no usamos S3WritePolicy con !Ref CoordinatesBucket
+  ###      para no crear dependencia circular.
+  #################################################################
+  PresignFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: presign/
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${AWS::StackName}-coordinates-bucket/*"
+      Environment:
+        Variables:
+          BUCKET: !Sub "${AWS::StackName}-coordinates-bucket"
+      Events:
+        ApiPost:
+          Type: Api
+          Properties:
+            Path: /presign
+            Method: post
+
+  #################################################################
+  ### 5) Lambda · IngestFunction:
+  ###     se dispara al subir un CSV y envía mensajes a SQS
+  ###
+  ###    – POLÍTICA INLINE “GetObject” en vez de S3ReadPolicy con !Ref CoordinatesBucket
+  ###    – SAM inyectará, automáticamente, la notificación S3→Lambda
+  #################################################################
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: ingest/
+      Runtime: python3.10
+      MemorySize: 2048
+      Timeout: 900
+      Policies:
+        # Permiso CRUD en DynamoDB “coordinates”
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoordinatesTable
+
+        # Permiso para enviar mensajes a SQS “CoordinatesQueue”
+        - SQSSendMessagePolicy:
+            QueueName: !Ref CoordinatesQueue
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt CoordinatesQueue.QueueName
+        # Permiso inline para leer objetos desde S3:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${AWS::StackName}-coordinates-bucket/*"
+
+      Environment:
+        Variables:
+          TABLE: !Ref CoordinatesTable
+          QUEUE_URL: !GetAtt CoordinatesQueue.QueueUrl
+
+      Events:
+        S3PutEvent:
+          Type: S3
+          Properties:
+            Bucket: !Ref CoordinatesBucket 
+            Events: s3:ObjectCreated:*
+
+  #################################################################
+  ### 6) Lambda · ProcessFunction:
+  ###     lee mensajes de SQS y actualiza DynamoDB
+  #################################################################
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: process/
+      Runtime: python3.10
+      MemorySize: 2048
+      Timeout: 900
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CoordinatesTable
+      Environment:
+        Variables:
+          TABLE: !Ref CoordinatesTable
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt CoordinatesQueue.Arn
+            BatchSize: 10
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt CoordinatesDLQ.Arn
+
+Outputs:
+  ApiUrl:
+    Description: "Endpoint URL (Presign API)"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"

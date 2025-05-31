@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: "Pipeline CSV \u2192 DynamoDB \u2192 Postcode lookup"
+Globals:
+  Function:
+    Timeout: 900
+    Runtime: python3.10
+    MemorySize: 2048
+Resources:
+  CoordinatesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: ${AWS::StackName}-coordinates-bucket
+  CoordinatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: coordinates
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: id
+        KeyType: HASH
+  CoordinatesQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+  CoordinatesDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 900
+  PresignFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: PresignFunction
+      Policies:
+      - Statement:
+        - Effect: Allow
+          Action:
+          - s3:PutObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AWS::StackName}-coordinates-bucket/*
+      Environment:
+        Variables:
+          BUCKET:
+            Fn::Sub: ${AWS::StackName}-coordinates-bucket
+      Events:
+        ApiPost:
+          Type: Api
+          Properties:
+            Path: /presign
+            Method: post
+    Metadata:
+      SamResourceId: PresignFunction
+  IngestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: IngestFunction
+      Runtime: python3.10
+      MemorySize: 2048
+      Timeout: 900
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: CoordinatesTable
+      - SQSSendMessagePolicy:
+          QueueName:
+            Ref: CoordinatesQueue
+      - SQSSendMessagePolicy:
+          QueueName:
+            Fn::GetAtt:
+            - CoordinatesQueue
+            - QueueName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - s3:GetObject
+          Resource:
+            Fn::Sub: arn:aws:s3:::${AWS::StackName}-coordinates-bucket/*
+      Environment:
+        Variables:
+          TABLE:
+            Ref: CoordinatesTable
+          QUEUE_URL:
+            Fn::GetAtt:
+            - CoordinatesQueue
+            - QueueUrl
+      Events:
+        S3PutEvent:
+          Type: S3
+          Properties:
+            Bucket:
+              Ref: CoordinatesBucket
+            Events: s3:ObjectCreated:*
+    Metadata:
+      SamResourceId: IngestFunction
+  ProcessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.handler
+      CodeUri: ProcessFunction
+      Runtime: python3.10
+      MemorySize: 2048
+      Timeout: 900
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: CoordinatesTable
+      Environment:
+        Variables:
+          TABLE:
+            Ref: CoordinatesTable
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - CoordinatesQueue
+              - Arn
+            BatchSize: 10
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn:
+          Fn::GetAtt:
+          - CoordinatesDLQ
+          - Arn
+    Metadata:
+      SamResourceId: ProcessFunction
+Outputs:
+  ApiUrl:
+    Description: Endpoint URL (Presign API)
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
