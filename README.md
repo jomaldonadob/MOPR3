@@ -38,8 +38,7 @@ Este proyecto implementa una canalización sin servidor en AWS en dos fases para
    * DynamoDB almacena cada coordenada original junto con los detalles de su código postal asociado.
 
 Visualmente, el flujo es:
-
-```mermaid
+'''
 flowchart LR
   subgraph API Layer
     PresignAPI["PresignFunction (Lambda)"]
@@ -73,7 +72,7 @@ flowchart LR
   CoordinatesQueue -->|Invoca| ProcessFunction
   ProcessFunction -->|Inserción por lotes| DynamoDB
   ProcessFunction -->|en caso de fallo| DLQ
-```
+'''
 
 ---
 
